@@ -1,0 +1,68 @@
+{
+  "feature_order": [
+    "transaction_date",
+    "house_age_years",
+    "distance_to_mrt_m",
+    "nearby_convenience_stores",
+    "latitude",
+    "longitude",
+    "log_distance_to_mrt_m",
+    "house_age_squared"
+  ],
+  "model": {
+    "alpha": 10.0,
+    "coefficients": [
+      1.754047329110183,
+      -5.8784892347780415,
+      0.6790065458418377,
+      1.1508030416769375,
+      3.614662176151102,
+      0.40641155931003237,
+      -7.28751447353723,
+      3.4231871783643735
+    ],
+    "intercept": 38.39154078550187
+  },
+  "model_type": "standard_scaler_ridge",
+  "model_version": "uci-real-estate-ridge-v1",
+  "scaler": {
+    "mean": [
+      2013.1666666682788,
+      17.28882175226586,
+      1059.6039616616322,
+      4.145015105740181,
+      24.969333232628387,
+      121.53388543806652,
+      6.388344329911974,
+      426.8230211480364
+    ],
+    "scale": [
+      0.28116431576073586,
+      11.310157539416284,
+      1216.0884043968972,
+      2.9492378425172014,
+      0.012465376270381934,
+      0.014953199802206905,
+      1.0932435461238972,
+      461.52450563480033
+    ]
+  },
+  "schema_version": 1,
+  "training": {
+    "dataset": {
+      "license": "CC BY 4.0",
+      "name": "UCI Real Estate Valuation",
+      "sha256": "aa437bdac3ca23200258a0a58d251c0af90651aeaf7c7a07aaa714f0f9f25e2c",
+      "url": "https://archive.ics.uci.edu/static/public/477/real+estate+valuation+data+set.zip"
+    },
+    "metrics": {
+      "mae": 4.367908627831691,
+      "r2": 0.745996389811886,
+      "rmse": 6.52775464860461
+    },
+    "random_state": 42,
+    "test_rows": 83,
+    "train_rows": 331,
+    "trained_at_utc": "2026-09-17T07:59:44.577490+00:00"
+  }
+}

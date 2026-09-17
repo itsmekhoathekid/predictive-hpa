@@ -1,0 +1,72 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: house-price-api
+  namespace: predictive-hpa-demo
+  labels:
+    app.kubernetes.io/name: house-price-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: house-price-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: house-price-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: house-price-api:local
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            # Keep interpreter/model startup CPU out of autoscaling samples.
+            initialDelaySeconds: 45
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 150m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: house-price-api
+  namespace: predictive-hpa-demo
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: house-price-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080

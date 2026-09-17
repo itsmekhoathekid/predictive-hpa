@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "house-price-api"
+version = "0.1.0"
+description = "FastAPI house-price demo with predictive Kubernetes autoscaling"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "pydantic-settings>=2.10,<3",
+  "uvicorn>=0.35,<1",
+]
+
+[dependency-groups]
+training = [
+  "openpyxl>=3.1,<4",
+  "pandas>=2.3,<3",
+  "scikit-learn>=1.7,<2",
+]
+test = [
+  "httpx>=0.28,<1",
+  "mypy>=1.17,<2",
+  "pandas-stubs>=2.3,<3",
+  "pytest>=8.4,<9",
+  "pytest-cov>=6.2,<8",
+  "ruff>=0.12,<1",
+  "scikit-learn-stubs>=0.0.3,<1",
+]
+load = ["locust>=2.40,<3"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/house_price_api"]
+
+[tool.pytest.ini_options]
+addopts = "--cov=house_price_api --cov-report=term-missing --cov-fail-under=85"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+packages = ["house_price_api", "training"]

@@ -1,0 +1,17 @@
+.artifacts
+.cache
+.git
+.github
+.mypy_cache
+.pytest_cache
+.ruff_cache
+.venv
+__pycache__
+tests
+training
+loadtest
+deploy
+scripts
+coverage.xml
+htmlcov
+
