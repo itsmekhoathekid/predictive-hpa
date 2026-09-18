@@ -8,7 +8,7 @@ readonly DEPLOYMENT="house-price-api"
 readonly HOST="http://127.0.0.1:8000"
 readonly USERS="${LOCUST_USERS:-150}"
 readonly SPAWN_RATE="${LOCUST_SPAWN_RATE:-25}"
-readonly RUN_TIME="${LOCUST_RUN_TIME:-3m}"
+readonly RUN_TIME="${LOCUST_RUN_TIME:-5m}"
 readonly REQUIRED_MAX_REPLICAS=8
 
 project_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,7 +27,7 @@ cleanup() {
 trap cleanup EXIT
 
 kube() {
-  minikube --profile "${PROFILE}" kubectl -- --context "${CONTEXT}" "$@"
+  kubectl --context "${CONTEXT}" "$@"
 }
 
 replica_count() {
@@ -38,14 +38,12 @@ replica_count() {
 }
 
 curl --fail --silent "${HOST}/healthz" >/dev/null
-echo "timestamp,ready_replicas" >"${sample_file}"
+echo "timestamp,ready_replicas,observed_replicas,desired_replicas,model_ready,samples_seen,updates_applied,pending_samples,prediction,mae,last_checkpoint" >"${sample_file}"
 echo "Starting Locust immediately; current PHPA history and replica count are preserved."
 
-uv run --group load locust \
+LOCUST_USERS="${USERS}" LOCUST_SPAWN_RATE="${SPAWN_RATE}" uv run --group load locust \
   --locustfile "${project_root}/loadtest/locustfile.py" \
   --headless \
-  --users "${USERS}" \
-  --spawn-rate "${SPAWN_RATE}" \
   --run-time "${RUN_TIME}" \
   --csv "${locust_stats_prefix}" \
   --csv-full-history \
@@ -59,7 +57,25 @@ while kill -0 "${locust_pid}" 2>/dev/null; do
     max_replicas=${current}
   fi
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  echo "${timestamp},${current}" | tee -a "${sample_file}"
+  phpa_json=$(kube get phpa house-price-api --namespace "${NAMESPACE}" -o json)
+  status_fields=$(jq -r '
+    (.status.modelStatuses[]? | select(.name == "house-price-online")) as $model |
+    [
+      ($model.observedReplicas // 0),
+      (.status.desiredReplicas // 0),
+      ($model.ready // false),
+      ($model.samplesSeen // 0),
+      ($model.updatesApplied // 0),
+      ($model.pendingSamples // 0),
+      ($model.lastPrediction // 0),
+      ($model.meanAbsoluteError // 0),
+      ($model.lastCheckpointTime // "")
+    ] | @csv
+  ' <<<"${phpa_json}")
+  if [[ -z "${status_fields}" ]]; then
+    status_fields='0,0,false,0,0,0,0,0,""'
+  fi
+  echo "${timestamp},${current},${status_fields}" | tee -a "${sample_file}"
   kube top pods --namespace "${NAMESPACE}" 2>/dev/null || true
   sleep 10
 done
@@ -81,3 +97,21 @@ fi
 
 echo "Load test passed: observed up to ${max_replicas} ready replicas."
 echo "Samples: ${sample_file}"
+
+summary=$(awk -F, '
+  NR > 1 {
+    pod_seconds += $2 * 10
+    if ($2 < $3) under_seconds += 10
+  }
+  END {
+    printf "pod_minutes=%.2f under_provisioned_seconds=%d", pod_seconds / 60, under_seconds
+  }
+' "${sample_file}")
+p95=$(awk -F, '
+  NR == 1 {
+    for (i = 1; i <= NF; i++) if ($i == "95%") column = i
+  }
+  $2 == "Aggregated" && column { value = $column }
+  END { print value }
+' "${locust_stats_prefix}_stats.csv")
+echo "Benchmark: ${summary} p95_ms=${p95:-unavailable}"

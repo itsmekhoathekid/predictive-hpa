@@ -1,9 +1,9 @@
 # FastAPI House Price Prediction with Predictive HPA
 
 This project trains a lightweight Ridge regression model on a real housing
-dataset, serves it through FastAPI, and uses the Predictive Horizontal Pod
-Autoscaler (PHPA) to scale the API from 1 to 8 pods from real CPU utilization
-on a local Minikube cluster.
+dataset, serves it through FastAPI, and uses an incrementally trained Predictive
+Horizontal Pod Autoscaler (PHPA) to scale the API from 1 to 8 pods from real CPU
+utilization on a local Minikube cluster.
 
 > [!CAUTION]
 > The model is an educational demonstration. Its training data only covers
@@ -68,13 +68,13 @@ predictive-hpa/
 │   ├── k8s/
 │   │   ├── namespace.yaml
 │   │   ├── application.yaml
-│   │   └── phpa.yaml
-│   └── operator/
-│       └── Dockerfile
+│   │   ├── phpa.yaml
+│   │   └── phpa-minibatch.yaml
 ├── scripts/
 │   ├── cluster-up.sh
 │   ├── install-operator.sh
-│   └── demo-autoscaling.sh
+│   ├── demo-autoscaling.sh
+│   └── test-operator-restart.sh
 ├── assets/
 ├── Dockerfile
 ├── Makefile
@@ -240,7 +240,7 @@ Source: [`scripts/cluster-up.sh`, lines 15–31](scripts/cluster-up.sh#L15-L31).
 | `--profile predictive-hpa` | Isolates this lab from other Minikube profiles. |
 | `--driver docker` | Runs the Minikube node as a Docker container. |
 | `--container-runtime containerd` | Uses containerd inside the Kubernetes node. |
-| `--kubernetes-version v1.26.15` | Matches the Kubernetes 0.26 client generation used by PHPA v0.13.2. |
+| `--kubernetes-version v1.26.15` | Keeps the demo on the Kubernetes version used by the existing local lab. |
 | `--cpus 2`, `--memory 4096` | Keeps the node small enough for CPU pressure while leaving room for eight lightweight API pods. |
 | `--ports 127.0.0.1:8000:30080` | Maps the API NodePort to a stable host URL. |
 | `--keep-context` | Preserves the user's currently selected Kubernetes context. |
@@ -308,7 +308,7 @@ spec:
   maxReplicas: 8
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 0
+      stabilizationWindowSeconds: 60
   metrics:
     - type: Resource
       resource:
@@ -317,12 +317,18 @@ spec:
           averageUtilization: 50
           type: Utilization
   models:
-    - type: Linear
-      name: house-price-linear
+    - type: OnlineLinear
+      name: house-price-online
       perSyncPeriod: 1
-      linear:
+      resetDuration: 10m
+      onlineLinear:
         lookAhead: 10000
-        historySize: 6
+        updateMode: datapoint
+        batchSize: 1
+        learningRate: 0.01
+        warmupSamples: 6
+        checkpointInterval: 1m
+        mode: active
   decisionType: maximum
   syncPeriod: 10000
 ```
@@ -335,12 +341,16 @@ Source: [`deploy/k8s/phpa.yaml`, lines 7–31](deploy/k8s/phpa.yaml#L7-L31).
 | `minReplicas: 1` | Keeps one API pod available when the service is idle. |
 | `maxReplicas: 8` | Caps the demo at eight pods so it fits on the two-core node. |
 | `averageUtilization: 50` | Requests scaling when average pod CPU exceeds 50% of the configured CPU request. |
-| `historySize: 6` | Fits the linear model over the latest six replica-demand observations. |
+| `updateMode: datapoint` | Applies one SGD update for every HPA-calculated replica observation. |
+| `learningRate: 0.01` | Controls how quickly the online model adapts to a changing trend. |
+| `warmupSamples: 6` | Uses reactive scaling alone until six observations have trained the model. |
 | `lookAhead: 10000` | Predicts required replicas 10,000 ms, or 10 seconds, into the future. |
+| `checkpointInterval: 1m` | Persists cached weights and pending samples to ConfigMap once per minute. |
+| `mode: active` | Includes predictions in scaling; `observe` enables shadow evaluation. |
 | `perSyncPeriod: 1` | Runs the predictive model every PHPA reconciliation period. |
 | `syncPeriod: 10000` | Reconciles metrics and replica decisions every 10 seconds. |
 | `decisionType: maximum` | Chooses the highest recommendation among the metric calculation and predictive models. |
-| `stabilizationWindowSeconds: 0` | Allows the demo to react to falling demand without an extra scale-down stabilization delay. |
+| `stabilizationWindowSeconds: 60` | Prevents a noisy prediction from immediately scaling down. |
 
 Do not deploy a standard Kubernetes HPA against the same Deployment because two
 controllers would compete to write the replica count. If a fresh run has
@@ -364,18 +374,16 @@ deploy:
 
 Source: [`Makefile`, lines 35–43](Makefile#L35-L43).
 
-The operator installer pins PHPA v0.13.2 to a source commit and SHA-256,
-detects the Minikube node architecture, builds the regular multi-architecture
-Dockerfile for `linux/arm64` or `linux/amd64`, and loads the resulting image into
-Minikube. The image applies a narrowly scoped `1e-9` epsilon before `ceil()` in
-the upstream linear-regression script so floating-point noise such as
-`1.0000000000000002` cannot create a phantom second replica. A build-time smoke
-test verifies that a constant six-sample history predicts exactly one replica.
+The operator installer builds `v0.14.0-online.1` from the sibling
+`predictive-horizontal-pod-autoscaler` fork by default, detects the Kubernetes
+node architecture, loads the image into Minikube, and installs the Helm chart
+and CRD from the same source tree. For a remote build, set both `PHPA_COMMIT` and
+`PHPA_SOURCE_SHA256` so the fork source is pinned and verified. The OLS epsilon
+fix now lives in the operator fork instead of a demo-only Dockerfile.
 
 Build and install source:
 
-- [`deploy/operator/Dockerfile`, lines 1–26](deploy/operator/Dockerfile#L1-L26)
-- [`scripts/install-operator.sh`, lines 24–61](scripts/install-operator.sh#L24-L61)
+- [`scripts/install-operator.sh`](scripts/install-operator.sh)
 
 ### Verify the deployment
 
@@ -387,9 +395,7 @@ curl --fail http://127.0.0.1:8000/healthz
 Wait until Metrics Server returns data before starting the demonstration:
 
 ```bash
-minikube --profile predictive-hpa kubectl -- \
-  --context predictive-hpa \
-  top pods --namespace predictive-hpa-demo
+kubectl --context predictive-hpa top pods --namespace predictive-hpa-demo
 ```
 
 Watch PHPA decisions:
@@ -401,9 +407,7 @@ make logs
 In another terminal, watch the API Deployment and pods:
 
 ```bash
-minikube --profile predictive-hpa kubectl -- \
-  --context predictive-hpa \
-  get deployment,pods,phpa \
+kubectl --context predictive-hpa get deployment,pods,phpa \
   --namespace predictive-hpa-demo \
   --watch
 ```
@@ -413,10 +417,10 @@ minikube --profile predictive-hpa kubectl -- \
 ### Locust scenario
 
 Each simulated user sends valid randomized house features to `POST /predict`
-with a 10–50 ms wait between requests. Five percent of requests close their
-connection so clients gradually reconnect through the Service and distribute
-traffic to newly created pods without causing excessive connection churn. The
-process exits unsuccessfully when the aggregate failure ratio is 1% or higher.
+with a 10–50 ms wait between requests. A five-minute load shape ramps through
+25%, 50%, 100%, 50%, and 25% of `LOCUST_USERS`, giving the online model a
+repeatable rising and falling trend. The process exits unsuccessfully when the
+aggregate failure ratio is 1% or higher.
 
 ```python
 class HousePriceUser(FastHttpUser):
@@ -463,9 +467,7 @@ The automated demo runs the following Locust command:
 uv run --group load locust \
   --locustfile loadtest/locustfile.py \
   --headless \
-  --users 150 \
-  --spawn-rate 25 \
-  --run-time 3m \
+  --run-time 5m \
   --csv .artifacts/locust \
   --csv-full-history \
   --host http://127.0.0.1:8000
@@ -477,9 +479,9 @@ Source: [`scripts/demo-autoscaling.sh`, lines 44–52](scripts/demo-autoscaling.
 | --- | --- |
 | `--group load` | Installs and uses the isolated Locust dependency group from `pyproject.toml`. |
 | `--headless` | Runs without the Locust web UI, which makes the demo repeatable in a terminal or CI job. |
-| `--users 150` | Maintains 150 concurrent simulated users. |
-| `--spawn-rate 25` | Adds 25 users per second, reaching full load in approximately six seconds. |
-| `--run-time 3m` | Keeps traffic active for three minutes. |
+| `LOCUST_USERS=150` | Sets the peak user count used by the staged load shape. |
+| `LOCUST_SPAWN_RATE=25` | Controls how quickly each stage reaches its target. |
+| `--run-time 5m` | Caps the five-stage scenario at five minutes; the load shape explicitly honors common Locust options. |
 | `--csv` and `--csv-full-history` | Save aggregate and time-series evidence under `.artifacts/`. |
 | `--host` | Sends traffic through the host-to-NodePort mapping instead of bypassing the Service. |
 
@@ -489,13 +491,23 @@ Run it through the repository target:
 make demo
 ```
 
-The script preserves the current PHPA history and replica count, starts Locust
-immediately, samples ready replicas and pod CPU every 10 seconds, requires eight
-ready replicas to be observed, and fails if Locust returns a non-zero exit code.
-It writes evidence to `.artifacts/autoscaling-demo.csv` and the
-`.artifacts/locust_*.csv` files. The script deliberately finishes when Locust
-finishes; PHPA continues running and naturally scales the Deployment down after
-the load disappears.
+The script preserves current PHPA state and samples ready, observed, and desired
+replicas together with OnlineLinear counters, prediction, MAE, and checkpoint
+time every 10 seconds. It reports pod-minutes, under-provisioned seconds, and
+Locust p95 latency from machine-readable files under `.artifacts/`.
+
+Switch between update modes without creating a second autoscaler:
+
+```bash
+make mode-datapoint
+make mode-minibatch
+```
+
+After at least one checkpoint, validate restart recovery and leader election:
+
+```bash
+make restart-test
+```
 
 Source: [`scripts/demo-autoscaling.sh`, lines 40–83](scripts/demo-autoscaling.sh#L40-L83).
 
@@ -559,20 +571,12 @@ while four newly created pods are visible as `0/1 Running`; they are inside the
 their 150m CPU limits while newer pods begin receiving reconnected Locust
 traffic. The PHPA operator and Metrics Server are also healthy.*
 
-### Recorded result
+### Recorded results
 
-The latest workspace run produced the following local evidence:
-
-- `77,694` prediction requests in three minutes.
-- `0` failed requests (`0.00%` failure ratio).
-- `534.51` requests/second average throughput.
-- `245.35 ms` average and `58 ms` median response time.
-- Ready replicas progressed `1 -> 2 -> 5 -> 6 -> 8` and reached the configured
-  maximum within the three-minute load window.
-
-Exact machine-readable results are generated under `.artifacts/`. That directory
-is gitignored because results depend on the host, Docker Desktop allocation, and
-background system load.
+Each run generates exact machine-readable results under `.artifacts/`, including
+Locust response-time history and OnlineLinear model status samples. The directory
+is gitignored because throughput, latency, and replica timing depend on the host,
+Docker Desktop allocation, update mode, and background load.
 
 ## Quality gates
 
@@ -596,17 +600,13 @@ and error handling.
 Wait for the first Metrics Server sample and check it directly:
 
 ```bash
-minikube --profile predictive-hpa kubectl -- \
-  --context predictive-hpa \
-  top pods --namespace predictive-hpa-demo
+kubectl --context predictive-hpa top pods --namespace predictive-hpa-demo
 ```
 
 If metrics remain unavailable, inspect Metrics Server:
 
 ```bash
-minikube --profile predictive-hpa kubectl -- \
-  --context predictive-hpa \
-  logs --namespace kube-system deployment/metrics-server
+kubectl --context predictive-hpa logs --namespace kube-system deployment/metrics-server
 ```
 
 ### The operator image has the wrong architecture
@@ -615,9 +615,7 @@ Run `make operator` again. The installer detects the node architecture before
 building. Verify the node and loaded image:
 
 ```bash
-minikube --profile predictive-hpa kubectl -- \
-  --context predictive-hpa \
-  get nodes \
+kubectl --context predictive-hpa get nodes \
   --output custom-columns=NAME:.metadata.name,ARCH:.status.nodeInfo.architecture
 
 minikube --profile predictive-hpa image ls | grep predictive-horizontal
@@ -625,8 +623,8 @@ minikube --profile predictive-hpa image ls | grep predictive-horizontal
 
 ### The API does not reach eight pods
 
-Confirm that `kubectl top pods` returns current CPU values, that Locust is using
-150 users for the full three minutes, and that no standard HPA targets the same
+Confirm that `kubectl top pods` returns current CPU values, that Locust reaches
+the 150-user peak stage, and that no standard HPA targets the same
 Deployment. If the two-core node still does not create enough CPU pressure,
 lower `averageUtilization` from `50` to `30` in `deploy/k8s/phpa.yaml` and rerun
 `make demo`.
@@ -653,13 +651,13 @@ delete any other Kubernetes cluster.
 ## References
 
 - [Predictive HPA Getting Started][phpa-guide]
-- [Predictive HPA v0.13.2][phpa-release]
+- [Incremental PHPA fork][phpa-fork]
 - [UCI Real Estate Valuation][uci-dataset]
 - [Minikube image load][minikube-image]
 - [Locust headless mode][locust-headless]
 
 [uci-dataset]: https://archive.ics.uci.edu/dataset/477/real%26
 [phpa-guide]: https://predictive-horizontal-pod-autoscaler.readthedocs.io/en/latest/user-guide/getting-started/
-[phpa-release]: https://github.com/jthomperoo/predictive-horizontal-pod-autoscaler/releases/tag/v0.13.2
+[phpa-fork]: https://github.com/itsmekhoathekid/predictive-horizontal-pod-autoscaler
 [minikube-image]: https://minikube.sigs.k8s.io/docs/commands/image_load/
 [locust-headless]: https://docs.locust.io/en/latest/running-without-web-ui.html

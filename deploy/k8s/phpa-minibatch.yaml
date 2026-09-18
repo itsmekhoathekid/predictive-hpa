@@ -27,8 +27,8 @@ spec:
       resetDuration: 10m
       onlineLinear:
         lookAhead: 10000
-        updateMode: datapoint
-        batchSize: 1
+        updateMode: minibatch
+        batchSize: 6
         learningRate: 0.01
         warmupSamples: 6
         checkpointInterval: 1m

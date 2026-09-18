@@ -25,17 +25,12 @@ minikube start \
   --keep-context
 
 minikube addons enable metrics-server --profile "${PROFILE}"
-minikube --profile "${PROFILE}" kubectl -- \
-  --context "${PROFILE}" \
-  patch deployment metrics-server --namespace kube-system --type=json \
+kubectl --context "${PROFILE}" patch deployment metrics-server --namespace kube-system --type=json \
   --patch='[{"op":"replace","path":"/spec/template/spec/containers/0/args/4","value":"--metric-resolution=15s"}]'
-minikube --profile "${PROFILE}" kubectl -- \
-  --context "${PROFILE}" \
-  rollout status deployment/metrics-server --namespace kube-system --timeout=180s
+kubectl --context "${PROFILE}" rollout status deployment/metrics-server --namespace kube-system --timeout=180s
 
 for _ in $(seq 1 36); do
-  if minikube --profile "${PROFILE}" kubectl -- \
-    --context "${PROFILE}" top nodes >/dev/null 2>&1; then
+  if kubectl --context "${PROFILE}" top nodes >/dev/null 2>&1; then
     echo "Metrics Server is ready."
     exit 0
   fi

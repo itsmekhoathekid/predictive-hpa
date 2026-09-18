@@ -1,6 +1,34 @@
+import os
 import random
 
-from locust import FastHttpUser, between, events, task
+from locust import FastHttpUser, LoadTestShape, between, events, task
+
+
+class StagedLoadShape(LoadTestShape):
+    """Ramp demand through repeatable stages so the online model can observe a trend."""
+
+    use_common_options = True
+    maximum_users = int(os.getenv("LOCUST_USERS", "150"))
+    spawn_rate = float(os.getenv("LOCUST_SPAWN_RATE", "25"))
+    stage_targets = (
+        (0.2, max(1, maximum_users // 4)),
+        (0.4, max(1, maximum_users // 2)),
+        (0.6, maximum_users),
+        (0.8, max(1, maximum_users // 2)),
+        (1.0, max(1, maximum_users // 4)),
+    )
+
+    def tick(self) -> tuple[int, float] | None:
+        run_time = self.get_run_time()  # type: ignore[no-untyped-call]
+        if self.runner is None:
+            return None
+        options = self.runner.environment.parsed_options
+        configured_duration = options.run_time if options is not None else None
+        total_duration = float(configured_duration or 300)
+        for fraction, users in self.stage_targets:
+            if run_time < total_duration * fraction:
+                return users, self.spawn_rate
+        return None
 
 
 class HousePriceUser(FastHttpUser):
@@ -31,7 +59,7 @@ class HousePriceUser(FastHttpUser):
                 response.failure("prediction field is missing")
 
 
-@events.quitting.add_listener
+@events.quitting.add_listener  # type: ignore[untyped-decorator]
 def set_exit_code(environment, **_kwargs) -> None:  # type: ignore[no-untyped-def]
     if environment.stats.total.fail_ratio >= 0.01:
         environment.process_exit_code = 1

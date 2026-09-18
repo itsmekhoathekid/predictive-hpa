@@ -1,8 +1,8 @@
 PROFILE := predictive-hpa
 NAMESPACE := predictive-hpa-demo
-KUBE := minikube --profile $(PROFILE) kubectl -- --context $(PROFILE)
+KUBE := kubectl --context $(PROFILE)
 
-.PHONY: install train format lint typecheck test quality cluster operator deploy setup status logs load-ui demo destroy
+.PHONY: install train format lint typecheck test quality cluster operator deploy setup status logs load-ui demo mode-datapoint mode-minibatch restart-test destroy
 
 install:
 	uv sync --all-groups
@@ -55,6 +55,15 @@ load-ui:
 
 demo:
 	./scripts/demo-autoscaling.sh
+
+mode-datapoint:
+	$(KUBE) apply --filename deploy/k8s/phpa.yaml
+
+mode-minibatch:
+	$(KUBE) apply --filename deploy/k8s/phpa-minibatch.yaml
+
+restart-test:
+	./scripts/test-operator-restart.sh
 
 destroy:
 	minikube delete --profile $(PROFILE)
