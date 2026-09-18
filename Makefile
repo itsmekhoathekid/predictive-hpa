@@ -2,7 +2,7 @@ PROFILE := predictive-hpa
 NAMESPACE := predictive-hpa-demo
 KUBE := kubectl --context $(PROFILE)
 
-.PHONY: install train format lint typecheck test quality cluster operator deploy setup status logs load-ui demo mode-datapoint mode-minibatch restart-test destroy
+.PHONY: install train format lint typecheck test quality cluster operator deploy setup status logs load-ui demo mode-linear mode-datapoint mode-minibatch restart-test destroy
 
 install:
 	uv sync --all-groups
@@ -55,6 +55,9 @@ load-ui:
 
 demo:
 	./scripts/demo-autoscaling.sh
+
+mode-linear:
+	$(KUBE) apply --filename deploy/k8s/phpa-linear.yaml
 
 mode-datapoint:
 	$(KUBE) apply --filename deploy/k8s/phpa.yaml

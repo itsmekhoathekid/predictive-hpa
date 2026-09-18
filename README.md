@@ -295,10 +295,73 @@ Source: [`deploy/k8s/application.yaml`, lines 59–72](deploy/k8s/application.ya
 
 ### Predictive HPA configuration
 
-The complete autoscaling policy is intentionally small and follows the PHPA
-CPU-resource example:
+The demo keeps the original PHPA `Linear` configuration and the incremental
+`OnlineLinear` configuration as separate manifests. They use the same PHPA name,
+so applying one manifest switches the model without creating two autoscalers for
+the same Deployment.
+
+#### Original PHPA Linear model
+
+This is the normal predictive configuration from the upstream PHPA design. It
+stores a rolling replica-demand history and refits a linear regression when a
+prediction is requested:
 
 ```yaml
+apiVersion: jamiethompson.me/v1alpha1
+kind: PredictiveHorizontalPodAutoscaler
+metadata:
+  name: house-price-api
+  namespace: predictive-hpa-demo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: house-price-api
+  minReplicas: 1
+  maxReplicas: 8
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 0
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          averageUtilization: 50
+          type: Utilization
+  models:
+    - type: Linear
+      name: house-price-linear
+      perSyncPeriod: 1
+      linear:
+        lookAhead: 10000
+        historySize: 6
+  decisionType: maximum
+  syncPeriod: 10000
+```
+
+Source: [`deploy/k8s/phpa-linear.yaml`, lines 1–31](deploy/k8s/phpa-linear.yaml#L1-L31).
+
+| Linear option | Meaning |
+| --- | --- |
+| `historySize: 6` | Keeps the latest six HPA-calculated replica-demand observations and discards older values. |
+| `lookAhead: 10000` | Asks the regression to forecast demand 10,000 ms, or 10 seconds, ahead. |
+| `perSyncPeriod: 1` | Fits and emits a prediction on every PHPA synchronization period. |
+
+Apply this configuration with `make mode-linear`.
+
+#### Incremental OnlineLinear model
+
+The current demo configuration trains a small linear model in Go with every
+HPA-calculated replica-demand observation. It checkpoints learned state without
+refitting the complete history:
+
+```yaml
+apiVersion: jamiethompson.me/v1alpha1
+kind: PredictiveHorizontalPodAutoscaler
+metadata:
+  name: house-price-api
+  namespace: predictive-hpa-demo
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
@@ -333,7 +396,25 @@ spec:
   syncPeriod: 10000
 ```
 
-Source: [`deploy/k8s/phpa.yaml`, lines 7–31](deploy/k8s/phpa.yaml#L7-L31).
+Source: [`deploy/k8s/phpa.yaml`, lines 1–37](deploy/k8s/phpa.yaml#L1-L37).
+
+| OnlineLinear option | Accepted values and behavior |
+| --- | --- |
+| `lookAhead` | Forecast horizon in milliseconds; must be at least `1`. The demo uses `10000` for 10 seconds. Changing it starts a new model generation. |
+| `updateMode` | `datapoint` applies one SGD update per observation. `minibatch` accumulates observations and applies their average gradient when the batch is full. Changing it starts a new generation. |
+| `batchSize` | Must be `1` for `datapoint`. For `minibatch` it must be at least `2` and defaults to `6`; changing it starts a new generation. |
+| `learningRate` | SGD step size in `(0, 1]`, default `0.01`. Larger values adapt faster but may oscillate; changing it starts a new generation. |
+| `warmupSamples` | Minimum trained samples before prediction can affect scaling; at least `2`, default `6`. Before warmup, PHPA uses only the reactive metric result. Changing it preserves weights. |
+| `checkpointInterval` | ConfigMap persistence interval, default `1m`; it cannot be shorter than `syncPeriod`. A hard crash can lose at most one checkpoint interval plus one sync. Changing it preserves weights. |
+| `mode` | `active` includes the prediction in the replica decision. `observe` still trains, predicts, updates status and metrics, but cannot change the replica target. Switching mode preserves weights. |
+| `perSyncPeriod` | Controls only how often a prediction is emitted. `OnlineLinear` still consumes and trains on one observation every sync. |
+| `resetDuration` | Clears stale learned state after the configured period without observations; the demo uses `10m`. |
+
+Use `make mode-datapoint` for this manifest. Use `make mode-minibatch` to apply
+the same policy with `updateMode: minibatch` and `batchSize: 6`; that variant is
+defined in [`deploy/k8s/phpa-minibatch.yaml`, lines 1–37](deploy/k8s/phpa-minibatch.yaml#L1-L37).
+
+#### Shared scaling policy
 
 | Configuration | Meaning |
 | --- | --- |
@@ -341,16 +422,9 @@ Source: [`deploy/k8s/phpa.yaml`, lines 7–31](deploy/k8s/phpa.yaml#L7-L31).
 | `minReplicas: 1` | Keeps one API pod available when the service is idle. |
 | `maxReplicas: 8` | Caps the demo at eight pods so it fits on the two-core node. |
 | `averageUtilization: 50` | Requests scaling when average pod CPU exceeds 50% of the configured CPU request. |
-| `updateMode: datapoint` | Applies one SGD update for every HPA-calculated replica observation. |
-| `learningRate: 0.01` | Controls how quickly the online model adapts to a changing trend. |
-| `warmupSamples: 6` | Uses reactive scaling alone until six observations have trained the model. |
-| `lookAhead: 10000` | Predicts required replicas 10,000 ms, or 10 seconds, into the future. |
-| `checkpointInterval: 1m` | Persists cached weights and pending samples to ConfigMap once per minute. |
-| `mode: active` | Includes predictions in scaling; `observe` enables shadow evaluation. |
-| `perSyncPeriod: 1` | Runs the predictive model every PHPA reconciliation period. |
 | `syncPeriod: 10000` | Reconciles metrics and replica decisions every 10 seconds. |
 | `decisionType: maximum` | Chooses the highest recommendation among the metric calculation and predictive models. |
-| `stabilizationWindowSeconds: 60` | Prevents a noisy prediction from immediately scaling down. |
+| `stabilizationWindowSeconds` | The upstream-style Linear manifest uses `0`; the OnlineLinear demo uses `60` seconds to prevent an incremental prediction from immediately scaling down. |
 
 Do not deploy a standard Kubernetes HPA against the same Deployment because two
 controllers would compete to write the replica count. If a fresh run has
