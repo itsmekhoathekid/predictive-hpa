@@ -1,5 +1,5 @@
-apiVersion: jamiethompson.me/v1alpha1
-kind: PredictiveHorizontalPodAutoscaler
+apiVersion: autoscaling.itsmekhoathekid.dev/v1alpha1
+kind: RiverPredictiveHorizontalPodAutoscaler
 metadata:
   name: house-price-api
   namespace: predictive-hpa-demo
@@ -10,6 +10,7 @@ spec:
     name: house-price-api
   minReplicas: 1
   maxReplicas: 8
+  syncPeriod: 10s
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 60
@@ -18,15 +19,14 @@ spec:
       resource:
         name: cpu
         target:
-          averageUtilization: 50
           type: Utilization
+          averageUtilization: 50
   models:
-    - type: OnlineLinear
+    - type: RiverLinearRegression
       name: house-price-online
       perSyncPeriod: 1
-      resetDuration: 10m
-      onlineLinear:
-        lookAhead: 10000
+      riverLinearRegression:
+        lookAhead: 10s
         updateMode: datapoint
         batchSize: 1
         learningRate: 0.01
@@ -34,4 +34,3 @@ spec:
         checkpointInterval: 1m
         mode: active
   decisionType: maximum
-  syncPeriod: 10000

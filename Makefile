@@ -2,7 +2,7 @@ PROFILE := predictive-hpa
 NAMESPACE := predictive-hpa-demo
 KUBE := kubectl --context $(PROFILE)
 
-.PHONY: install train format lint typecheck test quality cluster operator deploy setup status logs load-ui demo mode-linear mode-datapoint mode-minibatch restart-test destroy
+.PHONY: install train format lint typecheck test quality cluster operator deploy setup status logs load-ui demo mode-observe mode-datapoint mode-minibatch restart-test destroy
 
 install:
 	uv sync --all-groups
@@ -43,12 +43,12 @@ deploy:
 setup: cluster operator deploy
 
 status:
-	$(KUBE) get deployments,pods,services,phpa --namespace $(NAMESPACE)
+	$(KUBE) get deployments,pods,services,rphpa --namespace $(NAMESPACE)
 	@$(KUBE) top pods --namespace $(NAMESPACE) || \
 		echo "Pod metrics are not available yet; wait for the first Metrics Server sample."
 
 logs:
-	$(KUBE) logs --namespace phpa-system --selector name=predictive-horizontal-pod-autoscaler --follow
+	$(KUBE) logs --namespace river-phpa-system --selector app.kubernetes.io/name=kopf-river-phpa --follow
 
 load-ui:
 	uv run --group load locust --locustfile loadtest/locustfile.py --host http://127.0.0.1:8000
@@ -56,8 +56,8 @@ load-ui:
 demo:
 	./scripts/demo-autoscaling.sh
 
-mode-linear:
-	$(KUBE) apply --filename deploy/k8s/phpa-linear.yaml
+mode-observe:
+	$(KUBE) apply --filename deploy/k8s/phpa-observe.yaml
 
 mode-datapoint:
 	$(KUBE) apply --filename deploy/k8s/phpa.yaml

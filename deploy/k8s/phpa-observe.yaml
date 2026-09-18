@@ -27,10 +27,10 @@ spec:
       perSyncPeriod: 1
       riverLinearRegression:
         lookAhead: 10s
-        updateMode: minibatch
-        batchSize: 6
+        updateMode: datapoint
+        batchSize: 1
         learningRate: 0.01
         warmupSamples: 6
         checkpointInterval: 1m
-        mode: active
+        mode: observe
   decisionType: maximum

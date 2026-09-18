@@ -38,8 +38,8 @@ replica_count() {
 }
 
 curl --fail --silent "${HOST}/healthz" >/dev/null
-echo "timestamp,ready_replicas,observed_replicas,desired_replicas,model_ready,samples_seen,updates_applied,pending_samples,prediction,mae,last_checkpoint" >"${sample_file}"
-echo "Starting Locust immediately; current PHPA history and replica count are preserved."
+echo "timestamp,ready_replicas,reactive_replicas,desired_replicas,model_ready,samples_seen,updates_applied,pending_samples,prediction,mae,last_checkpoint" >"${sample_file}"
+echo "Starting Locust immediately; current River PHPA history and replica count are preserved."
 
 LOCUST_USERS="${USERS}" LOCUST_SPAWN_RATE="${SPAWN_RATE}" uv run --group load locust \
   --locustfile "${project_root}/loadtest/locustfile.py" \
@@ -57,11 +57,11 @@ while kill -0 "${locust_pid}" 2>/dev/null; do
     max_replicas=${current}
   fi
   timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  phpa_json=$(kube get phpa house-price-api --namespace "${NAMESPACE}" -o json)
+  phpa_json=$(kube get rphpa house-price-api --namespace "${NAMESPACE}" -o json)
   status_fields=$(jq -r '
     (.status.modelStatuses[]? | select(.name == "house-price-online")) as $model |
     [
-      ($model.observedReplicas // 0),
+      (.status.reactiveReplicas // 0),
       (.status.desiredReplicas // 0),
       ($model.ready // false),
       ($model.samplesSeen // 0),

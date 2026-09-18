@@ -1,9 +1,9 @@
 # FastAPI House Price Prediction with Predictive HPA
 
 This project trains a lightweight Ridge regression model on a real housing
-dataset, serves it through FastAPI, and uses an incrementally trained Predictive
-Horizontal Pod Autoscaler (PHPA) to scale the API from 1 to 8 pods from real CPU
-utilization on a local Minikube cluster.
+dataset, serves it through FastAPI, and uses a Kopf operator with River online
+linear regression to scale the API from 1 to 8 pods from real CPU utilization
+on a local Minikube cluster.
 
 > [!CAUTION]
 > The model is an educational demonstration. Its training data only covers
@@ -17,7 +17,7 @@ flowchart LR
     L[Locust] -->|POST /predict| S[NodePort Service]
     S --> P[FastAPI pods]
     P --> M[JSON Ridge artifact]
-    MS[Metrics Server] -->|CPU metrics| H[Predictive HPA]
+    MS[Metrics Server] -->|CPU metrics| H[Kopf + River PHPA]
     H -->|desired replicas: 1..8| D[Deployment]
     D --> P
 ```
@@ -69,7 +69,8 @@ predictive-hpa/
 │   │   ├── namespace.yaml
 │   │   ├── application.yaml
 │   │   ├── phpa.yaml
-│   │   └── phpa-minibatch.yaml
+│   │   ├── phpa-minibatch.yaml
+│   │   └── phpa-observe.yaml
 ├── scripts/
 │   ├── cluster-up.sh
 │   ├── install-operator.sh
@@ -191,8 +192,8 @@ Install Python dependencies first:
 make install
 ```
 
-Create the cluster, install Metrics Server and PHPA, build both images, and
-deploy the API:
+Create the cluster, install Metrics Server and the River PHPA, pull the released
+operator image, build the API image, and deploy the API:
 
 ```bash
 make setup
@@ -293,22 +294,17 @@ Minikube host mapping publishes at <http://127.0.0.1:8000>.
 
 Source: [`deploy/k8s/application.yaml`, lines 59–72](deploy/k8s/application.yaml#L59-L72).
 
-### Predictive HPA configuration
+### Kopf + River predictive autoscaling
 
-The demo keeps the original PHPA `Linear` configuration and the incremental
-`OnlineLinear` configuration as separate manifests. They use the same PHPA name,
-so applying one manifest switches the model without creating two autoscalers for
-the same Deployment.
-
-#### Original PHPA Linear model
-
-This is the normal predictive configuration from the upstream PHPA design. It
-stores a rolling replica-demand history and refits a linear regression when a
-prediction is requested:
+The demo uses the independent `RiverPredictiveHorizontalPodAutoscaler` CRD from
+[`kopf-river-phpa`][river-phpa]. Its resource name and API group intentionally
+differ from the Go PHPA operator, so the two implementations can be evaluated
+without CRD or state collisions. The default manifest trains River incrementally
+from the reactive CPU replica demand:
 
 ```yaml
-apiVersion: jamiethompson.me/v1alpha1
-kind: PredictiveHorizontalPodAutoscaler
+apiVersion: autoscaling.itsmekhoathekid.dev/v1alpha1
+kind: RiverPredictiveHorizontalPodAutoscaler
 metadata:
   name: house-price-api
   namespace: predictive-hpa-demo
@@ -319,56 +315,7 @@ spec:
     name: house-price-api
   minReplicas: 1
   maxReplicas: 8
-  behavior:
-    scaleDown:
-      stabilizationWindowSeconds: 0
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          averageUtilization: 50
-          type: Utilization
-  models:
-    - type: Linear
-      name: house-price-linear
-      perSyncPeriod: 1
-      linear:
-        lookAhead: 10000
-        historySize: 6
-  decisionType: maximum
-  syncPeriod: 10000
-```
-
-Source: [`deploy/k8s/phpa-linear.yaml`, lines 1–31](deploy/k8s/phpa-linear.yaml#L1-L31).
-
-| Linear option | Meaning |
-| --- | --- |
-| `historySize: 6` | Keeps the latest six HPA-calculated replica-demand observations and discards older values. |
-| `lookAhead: 10000` | Asks the regression to forecast demand 10,000 ms, or 10 seconds, ahead. |
-| `perSyncPeriod: 1` | Fits and emits a prediction on every PHPA synchronization period. |
-
-Apply this configuration with `make mode-linear`.
-
-#### Incremental OnlineLinear model
-
-The current demo configuration trains a small linear model in Go with every
-HPA-calculated replica-demand observation. It checkpoints learned state without
-refitting the complete history:
-
-```yaml
-apiVersion: jamiethompson.me/v1alpha1
-kind: PredictiveHorizontalPodAutoscaler
-metadata:
-  name: house-price-api
-  namespace: predictive-hpa-demo
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: house-price-api
-  minReplicas: 1
-  maxReplicas: 8
+  syncPeriod: 10s
   behavior:
     scaleDown:
       stabilizationWindowSeconds: 60
@@ -380,12 +327,11 @@ spec:
           averageUtilization: 50
           type: Utilization
   models:
-    - type: OnlineLinear
+    - type: RiverLinearRegression
       name: house-price-online
       perSyncPeriod: 1
-      resetDuration: 10m
-      onlineLinear:
-        lookAhead: 10000
+      riverLinearRegression:
+        lookAhead: 10s
         updateMode: datapoint
         batchSize: 1
         learningRate: 0.01
@@ -393,26 +339,44 @@ spec:
         checkpointInterval: 1m
         mode: active
   decisionType: maximum
-  syncPeriod: 10000
 ```
 
 Source: [`deploy/k8s/phpa.yaml`, lines 1–37](deploy/k8s/phpa.yaml#L1-L37).
 
-| OnlineLinear option | Accepted values and behavior |
-| --- | --- |
-| `lookAhead` | Forecast horizon in milliseconds; must be at least `1`. The demo uses `10000` for 10 seconds. Changing it starts a new model generation. |
-| `updateMode` | `datapoint` applies one SGD update per observation. `minibatch` accumulates observations and applies their average gradient when the batch is full. Changing it starts a new generation. |
-| `batchSize` | Must be `1` for `datapoint`. For `minibatch` it must be at least `2` and defaults to `6`; changing it starts a new generation. |
-| `learningRate` | SGD step size in `(0, 1]`, default `0.01`. Larger values adapt faster but may oscillate; changing it starts a new generation. |
-| `warmupSamples` | Minimum trained samples before prediction can affect scaling; at least `2`, default `6`. Before warmup, PHPA uses only the reactive metric result. Changing it preserves weights. |
-| `checkpointInterval` | ConfigMap persistence interval, default `1m`; it cannot be shorter than `syncPeriod`. A hard crash can lose at most one checkpoint interval plus one sync. Changing it preserves weights. |
-| `mode` | `active` includes the prediction in the replica decision. `observe` still trains, predicts, updates status and metrics, but cannot change the replica target. Switching mode preserves weights. |
-| `perSyncPeriod` | Controls only how often a prediction is emitted. `OnlineLinear` still consumes and trains on one observation every sync. |
-| `resetDuration` | Clears stale learned state after the configured period without observations; the demo uses `10m`. |
+The River pipeline is `StandardScaler | LinearRegression`. In datapoint mode it
+calls `learn_one` every sync; in minibatch mode it buffers observations and calls
+`learn_many` only at the configured batch boundary. The target is the reactive
+replica demand before min/max clamping.
 
-Use `make mode-datapoint` for this manifest. Use `make mode-minibatch` to apply
-the same policy with `updateMode: minibatch` and `batchSize: 6`; that variant is
-defined in [`deploy/k8s/phpa-minibatch.yaml`, lines 1–37](deploy/k8s/phpa-minibatch.yaml#L1-L37).
+| River option | Accepted values and behavior |
+| --- | --- |
+| `lookAhead` | Forecast horizon as a duration (`ms`, `s`, `m`, or `h`). The demo predicts 10 seconds ahead. Changing it resets the model. |
+| `updateMode` | `datapoint` calls River `learn_one` per observation. `minibatch` calls `learn_many` when a full batch is available. Changing it resets the model. |
+| `batchSize` | Must be `1` for `datapoint`. For `minibatch` it must be at least `2` and defaults to `6`; changing it starts a new generation. |
+| `learningRate` | SGD rate in `(0, 1]`, default `0.01`, applied to both weights and intercept. Larger values adapt faster but can oscillate. Changing it resets the model. |
+| `warmupSamples` | Samples required before a prediction can affect scaling; minimum `2`, default `6`. Changing it preserves learned state. |
+| `checkpointInterval` | ConfigMap persistence interval, default `1m`; it cannot be shorter than `syncPeriod`. A hard crash can lose at most one interval plus one sync. Changing it preserves learned state. |
+| `mode` | Defaults to `observe`. `observe` trains and reports predictions without using them to scale; `active` chooses `max(reactive, predicted)`. Switching mode preserves learned state. |
+| `perSyncPeriod` | Emits one prediction every N syncs while training still consumes every observation. Changing it preserves learned state. |
+
+Three manifests share the same resource name, so applying a mode updates one
+autoscaler rather than creating competing controllers:
+
+```bash
+make mode-observe    # learn and report only
+make mode-datapoint  # active scaling with learn_one
+make mode-minibatch  # active scaling with learn_many, batchSize 6
+```
+
+Sources: [datapoint](deploy/k8s/phpa.yaml#L24-L36),
+[minibatch](deploy/k8s/phpa-minibatch.yaml#L24-L36), and
+[observe](deploy/k8s/phpa-observe.yaml#L24-L36).
+
+Changing `learningRate`, `updateMode`, `batchSize`, or `lookAhead` starts a new
+model generation. Changing `mode`, `warmupSamples`, `perSyncPeriod`, or
+`checkpointInterval` keeps the River weights. Checkpoints are stored in
+`rphpa-house-price-api-state`; corrupt or incompatible state resets only the
+model and leaves reactive CPU scaling available.
 
 #### Shared scaling policy
 
@@ -422,14 +386,19 @@ defined in [`deploy/k8s/phpa-minibatch.yaml`, lines 1–37](deploy/k8s/phpa-mini
 | `minReplicas: 1` | Keeps one API pod available when the service is idle. |
 | `maxReplicas: 8` | Caps the demo at eight pods so it fits on the two-core node. |
 | `averageUtilization: 50` | Requests scaling when average pod CPU exceeds 50% of the configured CPU request. |
-| `syncPeriod: 10000` | Reconciles metrics and replica decisions every 10 seconds. |
+| `syncPeriod: 10s` | Reconciles metrics and replica decisions every 10 seconds. |
 | `decisionType: maximum` | Chooses the highest recommendation among the metric calculation and predictive models. |
-| `stabilizationWindowSeconds` | The upstream-style Linear manifest uses `0`; the OnlineLinear demo uses `60` seconds to prevent an incremental prediction from immediately scaling down. |
+| `stabilizationWindowSeconds: 60` | Prevents a transient low recommendation from immediately scaling the Deployment down. |
 
 Do not deploy a standard Kubernetes HPA against the same Deployment because two
 controllers would compete to write the replica count. If a fresh run has
 healthy CPU metrics but cannot reach eight pods, change
 `averageUtilization: 50` to `30` and rerun the test.
+
+Version `v0.1.0` supports one `Deployment`, one CPU
+`Resource/Utilization` metric, and one operator replica. Memory,
+custom/external metrics, StatefulSets, and leader-elected HA are intentionally
+out of scope for this release.
 
 ### Application and operator images
 
@@ -448,14 +417,14 @@ deploy:
 
 Source: [`Makefile`, lines 35–43](Makefile#L35-L43).
 
-The operator installer builds `v0.14.0-online.1` from the sibling
-`predictive-horizontal-pod-autoscaler` fork by default, detects the Kubernetes
-node architecture, loads the image into Minikube, and installs the Helm chart
-and CRD from the same source tree. For a remote build, set both `PHPA_COMMIT` and
-`PHPA_SOURCE_SHA256` so the fork source is pinned and verified. The OLS epsilon
-fix now lives in the operator fork instead of a demo-only Dockerfile.
+The operator installer downloads the `kopf-river-phpa` source archive pinned to
+commit `3e936b3da02b9e5281ea7dfd7b46afaad1c91fa5`, verifies its SHA-256, and
+installs that chart with the matching public multi-architecture image
+`ghcr.io/itsmekhoathekid/kopf-river-phpa:v0.1.0`. Set
+`RIVER_PHPA_SOURCE_DIR` only when intentionally testing a local operator
+checkout.
 
-Build and install source:
+Installer source:
 
 - [`scripts/install-operator.sh`](scripts/install-operator.sh)
 
@@ -481,7 +450,7 @@ make logs
 In another terminal, watch the API Deployment and pods:
 
 ```bash
-kubectl --context predictive-hpa get deployment,pods,phpa \
+kubectl --context predictive-hpa get deployment,pods,rphpa \
   --namespace predictive-hpa-demo \
   --watch
 ```
@@ -565,19 +534,20 @@ Run it through the repository target:
 make demo
 ```
 
-The script preserves current PHPA state and samples ready, observed, and desired
-replicas together with OnlineLinear counters, prediction, MAE, and checkpoint
+The script preserves current PHPA state and samples ready, reactive, and desired
+replicas together with River counters, prediction, MAE, and checkpoint
 time every 10 seconds. It reports pod-minutes, under-provisioned seconds, and
 Locust p95 latency from machine-readable files under `.artifacts/`.
 
 Switch between update modes without creating a second autoscaler:
 
 ```bash
+make mode-observe
 make mode-datapoint
 make mode-minibatch
 ```
 
-After at least one checkpoint, validate restart recovery and leader election:
+After at least one checkpoint, validate single-replica restart recovery:
 
 ```bash
 make restart-test
@@ -648,7 +618,7 @@ traffic. The PHPA operator and Metrics Server are also healthy.*
 ### Recorded results
 
 Each run generates exact machine-readable results under `.artifacts/`, including
-Locust response-time history and OnlineLinear model status samples. The directory
+Locust response-time history and River model status samples. The directory
 is gitignored because throughput, latency, and replica timing depend on the host,
 Docker Desktop allocation, update mode, and background load.
 
@@ -683,16 +653,18 @@ If metrics remain unavailable, inspect Metrics Server:
 kubectl --context predictive-hpa logs --namespace kube-system deployment/metrics-server
 ```
 
-### The operator image has the wrong architecture
+### The operator image cannot be pulled
 
-Run `make operator` again. The installer detects the node architecture before
-building. Verify the node and loaded image:
+Run `make operator` again and inspect the pod. Release `v0.1.0` is published for
+both `linux/amd64` and `linux/arm64`:
 
 ```bash
 kubectl --context predictive-hpa get nodes \
   --output custom-columns=NAME:.metadata.name,ARCH:.status.nodeInfo.architecture
 
-minikube --profile predictive-hpa image ls | grep predictive-horizontal
+kubectl --context predictive-hpa describe pod \
+  --namespace river-phpa-system \
+  --selector app.kubernetes.io/name=kopf-river-phpa
 ```
 
 ### The API does not reach eight pods
@@ -724,14 +696,18 @@ delete any other Kubernetes cluster.
 
 ## References
 
-- [Predictive HPA Getting Started][phpa-guide]
-- [Incremental PHPA fork][phpa-fork]
+- [Kopf + River PHPA source][river-phpa]
+- [River online machine learning][river]
+- [Kopf operator framework][kopf]
+- [Kubernetes HPA algorithm][hpa-algorithm]
 - [UCI Real Estate Valuation][uci-dataset]
 - [Minikube image load][minikube-image]
 - [Locust headless mode][locust-headless]
 
 [uci-dataset]: https://archive.ics.uci.edu/dataset/477/real%26
-[phpa-guide]: https://predictive-horizontal-pod-autoscaler.readthedocs.io/en/latest/user-guide/getting-started/
-[phpa-fork]: https://github.com/itsmekhoathekid/predictive-horizontal-pod-autoscaler
+[river-phpa]: https://github.com/itsmekhoathekid/kopf-river-phpa
+[river]: https://riverml.xyz/
+[kopf]: https://kopf.readthedocs.io/
+[hpa-algorithm]: https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/#algorithm-details
 [minikube-image]: https://minikube.sigs.k8s.io/docs/commands/image_load/
 [locust-headless]: https://docs.locust.io/en/latest/running-without-web-ui.html
